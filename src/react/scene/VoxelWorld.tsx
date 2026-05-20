@@ -2,15 +2,15 @@ import { useMemo } from 'react';
 import * as THREE from 'three';
 import { useTexture } from '@react-three/drei';
 import { TileBlock } from './TileBlock';
-import { createWorldMap, gridToWorld, tileDefs, type TileKind } from './tileWorld';
+import { createWorldMap, getTopTextureForCell, gridToWorld, tileDefs } from './tileWorld';
 
 export function VoxelWorld() {
   const map = useMemo(() => createWorldMap(), []);
   const textureUrls = useMemo(() => {
     const urls = new Set<string>();
     Object.values(tileDefs).forEach((def) => {
-      urls.add(def.top);
       urls.add(def.side);
+      Object.values(def.variants).forEach((url) => urls.add(url));
     });
     return Array.from(urls);
   }, []);
@@ -29,16 +29,17 @@ export function VoxelWorld() {
       textureMap.set(url, texture);
     });
 
-    const bottom = new THREE.MeshStandardMaterial({ color: '#6d5a4f', roughness: 0.96 });
-    const cache = new Map<TileKind, THREE.Material[]>();
-    (Object.keys(tileDefs) as TileKind[]).forEach((kind) => {
-      const def = tileDefs[kind];
+    const cache = new Map<string, THREE.Material[]>();
+    for (const [kind, def] of Object.entries(tileDefs)) {
       const sideTexture = textureMap.get(def.side);
-      const topTexture = textureMap.get(def.top);
       const side = new THREE.MeshStandardMaterial({ map: sideTexture, roughness: 0.94 });
-      const top = new THREE.MeshStandardMaterial({ map: topTexture, roughness: 0.9 });
-      cache.set(kind, [side, side, top, bottom, side, side]);
-    });
+      Object.values(def.variants).forEach((topUrl) => {
+        const topTexture = textureMap.get(topUrl);
+        const top = new THREE.MeshStandardMaterial({ map: topTexture, roughness: 0.9 });
+        const bottom = new THREE.MeshStandardMaterial({ map: sideTexture, roughness: 0.96 });
+        cache.set(`${kind}:${topUrl}`, [side, side, top, bottom, side, side]);
+      });
+    }
     return cache;
   }, [textureUrls, textures]);
 
@@ -47,7 +48,8 @@ export function VoxelWorld() {
       {map.map((row, z) =>
         row.map((cell, x) => {
           const position = gridToWorld(x, z);
-          const materials = materialCache.get(cell.kind);
+          const topTexture = getTopTextureForCell(map, x, z);
+          const materials = materialCache.get(`${cell.kind}:${topTexture}`);
           if (!materials) {
             return null;
           }
