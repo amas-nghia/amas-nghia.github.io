@@ -11,7 +11,7 @@ export async function loadKenneyCharacter(): Promise<THREE.Group> {
 
   const model = gltf.scene;
   model.name = 'character-b';
-  model.scale.setScalar(0.5);
+  model.scale.setScalar(0.38);
   model.rotation.y = Math.PI;
 
   const bounds = new THREE.Box3().setFromObject(model);

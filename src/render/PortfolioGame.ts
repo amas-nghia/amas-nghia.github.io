@@ -7,6 +7,8 @@ import { PlayerState } from '../simulation/PlayerState';
 import { createCharacter } from './objects/createCharacter';
 import { createStation, type StationObject } from './objects/createStation';
 import { loadKenneyCharacter } from './loaders/loadKenneyCharacter';
+import { CharacterAnimator } from './objects/CharacterAnimator';
+import { createEnvironment, type EnvironmentObject } from './objects/createEnvironment';
 
 type UiRefs = {
   projectPanel: HTMLDivElement;
@@ -32,8 +34,10 @@ export class PortfolioGame {
   private readonly input: InputState;
   private readonly player = new PlayerState();
   private readonly playerObject = createCharacter();
+  private readonly characterAnimator = new CharacterAnimator();
   private readonly stations: StationObject[] = [];
   private readonly ui: UiRefs;
+  private environment: EnvironmentObject | null = null;
   private animationId = 0;
   private nearestProject: Project | null = null;
   private cameraYaw = 0;
@@ -80,36 +84,25 @@ export class PortfolioGame {
   }
 
   private setupScene(): void {
-    this.scene.background = new THREE.Color('#dce6ea');
-    this.scene.fog = new THREE.Fog('#dce6ea', 24, 58);
+    this.scene.background = new THREE.Color('#d9e5e8');
+    this.scene.fog = new THREE.Fog('#d9e5e8', 26, 64);
 
-    const ambient = new THREE.HemisphereLight('#f3fbff', '#59666f', 1.6);
+    const ambient = new THREE.HemisphereLight('#f7fbff', '#53636b', 1.45);
     this.scene.add(ambient);
 
-    const sun = new THREE.DirectionalLight('#ffffff', 2.4);
-    sun.position.set(-10, 16, 9);
+    const sun = new THREE.DirectionalLight('#ffffff', 2.65);
+    sun.position.set(-12, 18, 10);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -28;
-    sun.shadow.camera.right = 28;
-    sun.shadow.camera.top = 28;
-    sun.shadow.camera.bottom = -28;
+    sun.shadow.camera.left = -34;
+    sun.shadow.camera.right = 34;
+    sun.shadow.camera.top = 34;
+    sun.shadow.camera.bottom = -34;
     this.scene.add(sun);
-
-    const floor = new THREE.Mesh(
-      new THREE.CircleGeometry(28, 96),
-      new THREE.MeshStandardMaterial({ color: '#eef0e7', roughness: 0.92 })
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.receiveShadow = true;
-    this.scene.add(floor);
-
-    const grid = new THREE.GridHelper(56, 28, '#b9c1bd', '#ced5d1');
-    grid.position.y = 0.012;
-    this.scene.add(grid);
 
     this.createWorldObjects();
     this.playerObject.position.copy(this.player.position);
+    this.characterAnimator.setModel(this.playerObject);
     this.scene.add(this.playerObject);
     void this.replaceCharacterWithKenneyAsset();
 
@@ -122,52 +115,21 @@ export class PortfolioGame {
       const character = await loadKenneyCharacter();
       this.playerObject.clear();
       this.playerObject.add(character);
+      this.characterAnimator.setModel(character);
     } catch (error) {
       console.warn('Failed to load Kenney character asset. Using procedural fallback.', error);
     }
   }
 
   private createWorldObjects(): void {
-    const center = new THREE.Mesh(
-      new THREE.CylinderGeometry(2.2, 2.5, 0.42, 48),
-      new THREE.MeshStandardMaterial({ color: '#20252d', roughness: 0.78 })
-    );
-    center.position.y = 0.21;
-    center.castShadow = true;
-    center.receiveShadow = true;
-    this.scene.add(center);
-
-    const beacon = new THREE.Mesh(
-      new THREE.OctahedronGeometry(0.68, 1),
-      new THREE.MeshStandardMaterial({
-        color: '#2f7df6',
-        emissive: '#2f7df6',
-        emissiveIntensity: 0.22,
-        roughness: 0.4
-      })
-    );
-    beacon.position.y = 2.25;
-    beacon.castShadow = true;
-    this.scene.add(beacon);
+    this.environment = createEnvironment({ projects });
+    this.scene.add(this.environment.group);
 
     for (const project of projects) {
       const station = createStation(project);
       station.group.lookAt(0, station.group.position.y, 0);
       this.stations.push(station);
       this.scene.add(station.group);
-    }
-
-    for (let i = 0; i < 18; i += 1) {
-      const angle = (i / 18) * Math.PI * 2;
-      const radius = 19 + (i % 3) * 1.6;
-      const height = 0.45 + (i % 4) * 0.18;
-      const marker = new THREE.Mesh(
-        new THREE.BoxGeometry(0.22, height, 0.22),
-        new THREE.MeshStandardMaterial({ color: i % 2 ? '#9ca8a3' : '#707b80', roughness: 0.85 })
-      );
-      marker.position.set(Math.cos(angle) * radius, height / 2, Math.sin(angle) * radius);
-      marker.castShadow = true;
-      this.scene.add(marker);
     }
   }
 
@@ -177,6 +139,8 @@ export class PortfolioGame {
 
     this.updateCameraIntent(delta);
     this.updatePlayer(delta);
+    this.environment?.update(elapsed);
+    this.characterAnimator.update(elapsed, this.player.velocity.length());
     this.updateStations(elapsed);
     this.updateCamera(delta);
     this.renderer.render(this.scene, this.camera);
@@ -223,8 +187,7 @@ export class PortfolioGame {
     this.playerObject.position.copy(this.player.position);
     this.playerObject.rotation.y = this.player.yaw;
 
-    const bob = Math.sin(this.clock.elapsedTime * 10) * Math.min(this.player.velocity.length() / 6, 1) * 0.035;
-    this.playerObject.position.y = this.player.position.y + bob;
+    this.playerObject.position.y = this.player.position.y;
 
     this.updateNearestProject();
   }
@@ -261,8 +224,9 @@ export class PortfolioGame {
   }
 
   private updateCamera(delta: number): void {
-    const distance = 8.2;
-    const height = 4.7;
+    const isCompact = window.innerWidth < 720;
+    const distance = isCompact ? 16.5 : 12.2;
+    const height = isCompact ? 8.6 : 6.25;
     const offset = new THREE.Vector3(
       Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * distance,
       height + Math.sin(this.cameraPitch) * 1.3,
@@ -292,7 +256,7 @@ export class PortfolioGame {
       <aside class="quick-panel">
         <div>
           <span class="panel-label">Controls</span>
-          <p>WASD move · Mouse/QE camera · Shift sprint · F inspect</p>
+          <p>WASD move - Mouse/QE camera - Shift sprint - F inspect</p>
         </div>
         <div>
           <span class="panel-label">Skills</span>
@@ -317,7 +281,7 @@ export class PortfolioGame {
       <div class="prompt"></div>
 
       <article class="project-panel" aria-live="polite">
-        <button class="close-button" type="button" aria-label="Close project panel">×</button>
+        <button class="close-button" type="button" aria-label="Close project panel">x</button>
         <p class="eyebrow">Selected Project</p>
         <h2></h2>
         <p class="project-meta"></p>
@@ -347,7 +311,7 @@ export class PortfolioGame {
   private openProjectPanel(project: Project): void {
     this.player.activeProjectId = project.id;
     this.ui.projectTitle.textContent = project.name;
-    this.ui.projectMeta.textContent = `${project.platform} · ${project.role} · Team size: ${project.teamSize}`;
+    this.ui.projectMeta.textContent = `${project.platform} - ${project.role} - Team size: ${project.teamSize}`;
     this.ui.projectTech.innerHTML = project.tech.map((tech) => `<span>${tech}</span>`).join('');
     this.ui.projectBullets.innerHTML = project.bullets.map((bullet) => `<li>${bullet}</li>`).join('');
     this.ui.projectPanel.classList.add('is-open');
