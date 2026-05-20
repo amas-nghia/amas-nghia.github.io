@@ -22,6 +22,15 @@ body,
   overflow: hidden;
 }
 
+.app-shell {
+  position: fixed;
+  inset: 0;
+}
+
+.app-shell canvas {
+  display: block;
+}
+
 button,
 a {
   font: inherit;
