@@ -62,6 +62,10 @@ a {
   pointer-events: none;
 }
 
+.cv-overlay::before {
+  display: none;
+}
+
 .hero-panel {
   position: absolute;
   top: 24px;
