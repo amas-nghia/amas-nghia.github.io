@@ -1,7 +1,13 @@
 import { useFrame, useLoader, useThree } from '@react-three/fiber';
-import { Center, Text3D, useGLTF } from '@react-three/drei';
+import { Center, ContactShadows, Text3D, useGLTF } from '@react-three/drei';
+import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from '@react-three/rapier';
 import { forwardRef, useEffect, useMemo, useRef, type MutableRefObject, type Ref } from 'react';
 import * as THREE from 'three';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
 const ASSET_BASE = './assets/vendor/kaykit/city-builder-bits';
 const SKYBOX_BASE = './assets/vendor/sky/sky_89_2k/sky_89_cubemap_2k';
@@ -53,6 +59,9 @@ const CORNER_ARC_SEGMENTS = 24;
 const CORNER_ARC_RADIUS_SCALE = 0.28;
 const CAMERA_HEADING_SMOOTHNESS = 7;
 const CAMERA_LOOK_SMOOTHNESS = 8;
+const BLOOM_STRENGTH = 0.26;
+const BLOOM_RADIUS = 0.58;
+const BLOOM_THRESHOLD = 0.78;
 
 type DriftFxState = {
   leftRear: THREE.Vector3;
@@ -95,23 +104,15 @@ type CvPoiMarker = CvPoi & {
 
 type BumpableSpec = {
   id: string;
-  kind: 'text' | 'box';
+  kind: 'text' | 'box' | 'block';
   label?: string;
   model?: Extract<ModelName, 'box_A' | 'box_B' | 'dumpster' | 'trash_A' | 'trash_B'>;
   position: THREE.Vector3;
   rotation?: number;
   color?: string;
   scale?: number;
+  size?: [number, number, number];
   radius: number;
-};
-
-type BumpableState = {
-  offset: THREE.Vector3;
-  velocity: THREE.Vector3;
-  rotation: THREE.Euler;
-  angularVelocity: THREE.Vector3;
-  cooldown: number;
-  grounded: boolean;
 };
 
 type TrafficBumpState = {
@@ -279,6 +280,7 @@ export function CityScene({
   const uTurnEndTravel = useRef(0.02);
   const dustSources = useRef<DustSource[]>([]);
   const playerVelocity = useRef(new THREE.Vector3());
+  const playerYaw = useRef(0);
   const trafficBumps = useRef<TrafficBumpState[]>(
     trafficCars.map(() => ({
       offset: new THREE.Vector3(),
@@ -450,6 +452,7 @@ export function CityScene({
       onNearbyPoiChange?.(nearestPoi ?? null);
     }
     const vehicleYaw = Math.atan2(vehicleDirection.x, vehicleDirection.z);
+    playerYaw.current = vehicleYaw;
     visualCarPosition.current.lerp(vehicleCenter, 1 - Math.exp(-CAR_VISUAL_POSITION_SMOOTHNESS * delta));
     playerVelocity.current.set(Math.sin(vehicleYaw) * velocity.current, 0, Math.cos(vehicleYaw) * velocity.current);
     if (car) {
@@ -552,14 +555,21 @@ export function CityScene({
   return (
     <>
       <Skybox />
+      <SceneLighting />
+      <PostProcessing />
       <fog attach="fog" args={['#d4e0e2', 46, 82]} />
-      <CityGround />
-      <ModelInstances placements={roadLayout.placements} />
-      <TouchingBuildingBlock models={centerBuildingModels} refsStore={buildingRefs} roadLayout={roadLayout} />
-      <OuterBuildingRing refsStore={buildingRefs} roadLayout={roadLayout} />
-      <CentralCollisionBlock bounds={centralBounds} />
-      <CvMarkers pois={cvPois} />
-      <BumpableObjects specs={bumpables} playerPosition={visualCarPosition} playerVelocity={playerVelocity} centralBounds={centralBounds} />
+      <ContactShadows position={[0, 0.035, 0]} opacity={0.3} scale={34} blur={2.1} far={8} resolution={1024} color="#2c3a40" />
+      <Physics gravity={[0, -13.5, 0]} colliders={false} timeStep="vary">
+        <RapierGround />
+        <PlayerCarCollider position={visualCarPosition} yaw={playerYaw} />
+        <CentralCollisionBlock bounds={centralBounds} />
+        <BumpableObjects specs={bumpables} />
+        <ModelInstances placements={roadLayout.placements} />
+        <TouchingBuildingBlock models={centerBuildingModels} refsStore={buildingRefs} roadLayout={roadLayout} />
+        <OuterBuildingRing refsStore={buildingRefs} roadLayout={roadLayout} />
+        <CityGround />
+        <CvMarkers pois={cvPois} />
+      </Physics>
       <FollowCar ref={targetCar} />
       <TireTracks driftFx={driftFx} />
       <DriftSmoke driftFx={driftFx} />
@@ -577,41 +587,211 @@ const trafficRefs = trafficCars.map(() => ({ current: { root: null, body: null }
 function CvMarkers({ pois }: { pois: CvPoiMarker[] }) {
   return (
     <>
-      {pois.map((poi) => (
-        <CvMarker key={poi.id} position={poi.position} />
+      {pois.map((poi, index) => (
+        <CvMarker key={poi.id} position={poi.position} index={index + 1} title={poi.title} />
       ))}
     </>
   );
 }
 
-function CvMarker({ position }: { position: THREE.Vector3 }) {
+function SceneLighting() {
+  return (
+    <>
+      <ambientLight intensity={0.92} color="#f3fbff" />
+      <hemisphereLight args={['#e5fbff', '#aeb8b5', 1.5]} />
+      <directionalLight
+        castShadow
+        position={[-7.5, 11.5, 6.5]}
+        intensity={1.95}
+        color="#fff3dc"
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-camera-left={-18}
+        shadow-camera-right={18}
+        shadow-camera-top={18}
+        shadow-camera-bottom={-18}
+        shadow-camera-near={1}
+        shadow-camera-far={34}
+        shadow-bias={-0.00018}
+        shadow-normalBias={0.045}
+      />
+    </>
+  );
+}
+
+function PostProcessing() {
+  const { gl, scene, camera, size } = useThree();
+  const pipeline = useMemo(() => {
+    const composer = new EffectComposer(gl);
+    const renderPass = new RenderPass(scene, camera);
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(size.width, size.height), BLOOM_STRENGTH, BLOOM_RADIUS, BLOOM_THRESHOLD);
+    const lutPass = new ShaderPass(portfolioLutShader);
+    const outputPass = new OutputPass();
+    composer.addPass(renderPass);
+    composer.addPass(bloomPass);
+    composer.addPass(lutPass);
+    composer.addPass(outputPass);
+    return { composer, bloomPass };
+  }, [camera, gl, scene]);
+
+  useEffect(() => {
+    pipeline.composer.setSize(size.width, size.height);
+    pipeline.bloomPass.setSize(size.width, size.height);
+  }, [pipeline, size.height, size.width]);
+
+  useEffect(
+    () => () => {
+      pipeline.composer.dispose();
+    },
+    [pipeline]
+  );
+
+  useFrame(() => {
+    pipeline.composer.render();
+  }, 1);
+
+  return null;
+}
+
+const portfolioLutShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    saturation: { value: 1.07 },
+    contrast: { value: 1.03 },
+    warmth: { value: 0.026 },
+    lift: { value: 0.036 },
+    vignette: { value: 0.12 }
+  },
+  vertexShader: `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`,
+  fragmentShader: `
+uniform sampler2D tDiffuse;
+uniform float saturation;
+uniform float contrast;
+uniform float warmth;
+uniform float lift;
+uniform float vignette;
+varying vec2 vUv;
+
+void main() {
+  vec4 base = texture2D(tDiffuse, vUv);
+  vec3 color = base.rgb;
+  color += vec3(warmth, warmth * 0.42, -warmth * 0.28);
+  float luma = dot(color, vec3(0.299, 0.587, 0.114));
+  color = mix(vec3(luma), color, saturation);
+  color = (color - 0.5) * contrast + 0.5 + lift;
+  float dist = distance(vUv, vec2(0.5));
+  color *= 1.0 - smoothstep(0.42, 0.82, dist) * vignette;
+  gl_FragColor = vec4(color, base.a);
+}
+`
+};
+
+function CvMarker({ position, index, title }: { position: THREE.Vector3; index: number; title: string }) {
   const floating = useRef<THREE.Group>(null);
+  const beacon = useRef<THREE.Group>(null);
+  const yaw = useMemo(() => getCheckpointFacingYaw(position), [position]);
+  const shortTitle = useMemo(() => title.replace('Unity ', '').replace(' & ', ' + '), [title]);
+  const labelTexture = useMemo(() => createCheckpointLabelTexture(index, shortTitle), [index, shortTitle]);
+
+  useEffect(
+    () => () => {
+      labelTexture.dispose();
+    },
+    [labelTexture]
+  );
 
   useFrame(({ clock }) => {
     const marker = floating.current;
-    if (!marker) return;
-    marker.position.y = position.y + Math.sin(clock.elapsedTime * 3.2) * 0.08;
-    marker.rotation.y = clock.elapsedTime * 1.3;
+    if (marker) marker.position.y = position.y + 0.56 + Math.sin(clock.elapsedTime * 3.2 + index) * 0.055;
+    const beaconObject = beacon.current;
+    if (beaconObject) {
+      beaconObject.rotation.y = clock.elapsedTime * 0.9;
+      const pulse = 1 + Math.sin(clock.elapsedTime * 3 + index) * 0.08;
+      beaconObject.scale.setScalar(pulse);
+    }
   });
 
   return (
     <group position={position}>
-      <mesh position={[0, 0.04, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.38, 0.52, 32]} />
-        <meshBasicMaterial color="#26f0a7" transparent opacity={0.72} side={THREE.DoubleSide} />
+      <mesh position={[0, 0.035, 0]} receiveShadow>
+        <cylinderGeometry args={[0.64, 0.64, 0.06, 36]} />
+        <meshStandardMaterial color="#172027" roughness={0.82} metalness={0} />
       </mesh>
-      <group ref={floating}>
-        <mesh position={[0, 0.58, 0]} rotation={[Math.PI, 0, 0]}>
-          <coneGeometry args={[0.22, 0.48, 24]} />
-          <meshBasicMaterial color="#20eaa0" />
+      <mesh position={[0, 0.075, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.58, 0.78, 42]} />
+        <meshBasicMaterial color="#49ffb2" transparent opacity={0.72} side={THREE.DoubleSide} />
+      </mesh>
+      <group ref={beacon} position={[0, 0.08, 0]}>
+        <mesh rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.22, 0.3, 28]} />
+          <meshBasicMaterial color="#d8fff0" transparent opacity={0.9} side={THREE.DoubleSide} />
         </mesh>
-        <mesh position={[0, 0.9, 0]}>
-          <sphereGeometry args={[0.13, 18, 18]} />
-          <meshBasicMaterial color="#b9ffe4" />
+      </group>
+      <mesh position={[0, 0.4, 0]}>
+        <cylinderGeometry args={[0.028, 0.04, 0.66, 12]} />
+        <meshStandardMaterial color="#203039" roughness={0.7} />
+      </mesh>
+      <group ref={floating} rotation={[0, yaw, 0]}>
+        <mesh position={[0, 0.44, 0]} castShadow>
+          <boxGeometry args={[0.98, 0.42, 0.06]} />
+          <meshStandardMaterial color="#101820" roughness={0.68} metalness={0} emissive="#071017" emissiveIntensity={0.18} />
+        </mesh>
+        <mesh position={[0, 0.44, 0.038]}>
+          <planeGeometry args={[1, 0.44]} />
+          <meshBasicMaterial map={labelTexture} transparent toneMapped={false} side={THREE.DoubleSide} />
+        </mesh>
+        <mesh position={[0, 0.44, -0.038]} rotation={[0, Math.PI, 0]}>
+          <planeGeometry args={[1, 0.44]} />
+          <meshBasicMaterial map={labelTexture} transparent toneMapped={false} side={THREE.DoubleSide} />
         </mesh>
       </group>
     </group>
   );
+}
+
+function getCheckpointFacingYaw(position: THREE.Vector3) {
+  if (Math.abs(position.x) > Math.abs(position.z)) return position.x > 0 ? -Math.PI / 2 : Math.PI / 2;
+  return position.z > 0 ? Math.PI : 0;
+}
+
+function createCheckpointLabelTexture(index: number, title: string) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 224;
+  const context = canvas.getContext('2d');
+  if (context) {
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = '#101820';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = '#49ffb2';
+    context.beginPath();
+    context.arc(92, 112, 56, 0, Math.PI * 2);
+    context.fill();
+    context.fillStyle = '#101820';
+    context.font = '900 58px Inter, Arial, sans-serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(String(index).padStart(2, '0'), 92, 112);
+    context.textAlign = 'left';
+    context.fillStyle = '#9fe9d2';
+    context.font = '900 24px Inter, Arial, sans-serif';
+    context.fillText('CHECKPOINT', 170, 82);
+    context.fillStyle = '#f4fff9';
+    context.font = '900 34px Inter, Arial, sans-serif';
+    context.fillText(title.slice(0, 22), 170, 126);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 function CentralCollisionBlock({ bounds }: { bounds: CollisionBounds }) {
@@ -624,6 +804,12 @@ function CentralCollisionBlock({ bounds }: { bounds: CollisionBounds }) {
 
   return (
     <group position={[centerX, wallHeight * 0.5, centerZ]}>
+      <RigidBody type="fixed" colliders={false}>
+        <CuboidCollider args={[width * 0.5, wallHeight * 0.5, wallThickness * 0.5]} position={[0, 0, -depth * 0.5]} />
+        <CuboidCollider args={[width * 0.5, wallHeight * 0.5, wallThickness * 0.5]} position={[0, 0, depth * 0.5]} />
+        <CuboidCollider args={[wallThickness * 0.5, wallHeight * 0.5, depth * 0.5]} position={[-width * 0.5, 0, 0]} />
+        <CuboidCollider args={[wallThickness * 0.5, wallHeight * 0.5, depth * 0.5]} position={[width * 0.5, 0, 0]} />
+      </RigidBody>
       <mesh position={[0, 0, -depth * 0.5]}>
         <boxGeometry args={[width, wallHeight, wallThickness]} />
         <meshBasicMaterial color="#8fa0a4" transparent opacity={0.62} />
@@ -644,115 +830,104 @@ function CentralCollisionBlock({ bounds }: { bounds: CollisionBounds }) {
   );
 }
 
-function BumpableObjects({
-  specs,
-  playerPosition,
-  playerVelocity,
-  centralBounds
-}: {
-  specs: BumpableSpec[];
-  playerPosition: MutableRefObject<THREE.Vector3>;
-  playerVelocity: MutableRefObject<THREE.Vector3>;
-  centralBounds: CollisionBounds;
-}) {
+function RapierGround() {
+  return (
+    <RigidBody type="fixed" colliders={false}>
+      <CuboidCollider args={[30, 0.08, 30]} position={[0, -0.12, 0]} friction={1.05} restitution={0.05} />
+    </RigidBody>
+  );
+}
+
+function PlayerCarCollider({ position, yaw }: { position: MutableRefObject<THREE.Vector3>; yaw: MutableRefObject<number> }) {
+  const body = useRef<RapierRigidBody>(null);
+  const rotation = useMemo(() => new THREE.Quaternion(), []);
+
+  useFrame(() => {
+    body.current?.setNextKinematicTranslation({
+      x: position.current.x,
+      y: CAR_RIDE_HEIGHT + 0.28,
+      z: position.current.z
+    });
+    rotation.setFromEuler(new THREE.Euler(0, yaw.current, 0));
+    body.current?.setNextKinematicRotation({ x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w });
+  });
+
+  return (
+    <RigidBody ref={body} type="kinematicPosition" colliders={false} position={[0, CAR_RIDE_HEIGHT + 0.28, 0]}>
+      <CuboidCollider args={[0.48, 0.26, 0.82]} friction={0.85} restitution={0.18} />
+    </RigidBody>
+  );
+}
+
+function BumpableObjects({ specs }: { specs: BumpableSpec[] }) {
   return (
     <>
       {specs.map((spec) => (
-        <BumpableObject key={spec.id} spec={spec} playerPosition={playerPosition} playerVelocity={playerVelocity} centralBounds={centralBounds} />
+        <BumpableObject key={spec.id} spec={spec} />
       ))}
     </>
   );
 }
 
-function BumpableObject({
-  spec,
-  playerPosition,
-  playerVelocity,
-  centralBounds
-}: {
-  spec: BumpableSpec;
-  playerPosition: MutableRefObject<THREE.Vector3>;
-  playerVelocity: MutableRefObject<THREE.Vector3>;
-  centralBounds: CollisionBounds;
-}) {
-  const group = useRef<THREE.Group>(null);
-  const state = useRef<BumpableState>({
-    offset: new THREE.Vector3(),
-    velocity: new THREE.Vector3(),
-    rotation: new THREE.Euler(0, spec.rotation ?? 0, 0),
-    angularVelocity: new THREE.Vector3(),
-    cooldown: 0,
-    grounded: true
-  });
-
-  useFrame((_, delta) => {
-    const object = group.current;
-    if (!object) return;
-    const body = state.current;
-    const hitVector = spec.position.clone().add(body.offset).sub(playerPosition.current);
-    hitVector.y = 0;
-
-    const playerSpeed = playerVelocity.current.length();
-    if (body.cooldown <= 0 && playerSpeed > 0.35 && hitVector.lengthSq() < (spec.radius + BUMPABLE_HIT_RADIUS) ** 2) {
-      const awayDirection = hitVector.lengthSq() > 0.001 ? hitVector.normalize() : new THREE.Vector3(1, 0, 0);
-      const driveDirection = playerVelocity.current.clone().setY(0).normalize();
-      const impulseDirection = awayDirection.multiplyScalar(0.42).add(driveDirection.multiplyScalar(0.58)).normalize();
-      const impulse = BUMPABLE_IMPULSE * THREE.MathUtils.clamp(playerSpeed / CAR_SPEED, 0.75, 1.6) * (spec.kind === 'text' ? 1.45 : 1.1);
-      body.velocity.addScaledVector(impulseDirection, impulse);
-      body.velocity.y += spec.kind === 'text' ? 7.8 : 5.4;
-      const contactSide = impulseDirection.x * Math.cos(spec.rotation ?? 0) - impulseDirection.z * Math.sin(spec.rotation ?? 0);
-      body.angularVelocity.add(new THREE.Vector3(
-        -impulseDirection.z * 8.4,
-        contactSide * 13.5 + (Math.random() - 0.5) * 3.5,
-        impulseDirection.x * 8.4
-      ));
-      body.cooldown = 0.62;
-      body.grounded = false;
-    }
-
-    body.cooldown = Math.max(0, body.cooldown - delta);
-    body.velocity.y -= 13.5 * delta;
-    body.offset.addScaledVector(body.velocity, delta);
-    body.rotation.x += body.angularVelocity.x * delta;
-    body.rotation.y += body.angularVelocity.y * delta;
-    body.rotation.z += body.angularVelocity.z * delta;
-
-    if (body.offset.y < 0) {
-      body.offset.y = 0;
-      if (!body.grounded && Math.abs(body.velocity.y) > 0.5) {
-        body.velocity.y = Math.abs(body.velocity.y) * (spec.kind === 'text' ? 0.46 : 0.36);
-        body.angularVelocity.multiplyScalar(0.82);
-      } else {
-        body.velocity.y = 0;
-        body.grounded = true;
-      }
-      body.velocity.x *= 0.72;
-      body.velocity.z *= 0.72;
-    }
-    resolveBoundsCollision(body.offset, body.velocity, spec.position, centralBounds, spec.radius);
-
-    const airDrag = body.grounded ? 2.2 : 0.45;
-    body.velocity.x *= 1 - Math.min(delta * airDrag, 0.85);
-    body.velocity.z *= 1 - Math.min(delta * airDrag, 0.85);
-    body.angularVelocity.multiplyScalar(1 - Math.min(delta * (body.grounded ? 2.4 : 0.7), 0.9));
-    object.position.copy(spec.position).add(body.offset);
-    if (object.position.y < BUMPABLE_GROUND_Y) object.position.y = BUMPABLE_GROUND_Y;
-    object.rotation.copy(body.rotation);
-  });
+function BumpableObject({ spec }: { spec: BumpableSpec }) {
+  const size = spec.size ?? [0.56, 0.56, 0.56];
+  const collider = getBumpableCollider(spec, size);
 
   return (
-    <group ref={group} position={spec.position} rotation={[0, spec.rotation ?? 0, 0]} scale={spec.scale ?? 1}>
+    <RigidBody
+      type="dynamic"
+      colliders={false}
+      position={spec.position}
+      rotation={[0, spec.rotation ?? 0, 0]}
+      linearDamping={1.55}
+      angularDamping={0.95}
+      friction={0.85}
+      restitution={0.34}
+      canSleep
+      ccd
+    >
+      <CuboidCollider args={collider.args} position={collider.position} friction={0.9} restitution={0.38} density={spec.kind === 'text' ? 0.42 : 0.7} />
+      <group scale={spec.scale ?? 1}>
       {spec.kind === 'text' ? (
         <Center position={[0, 0.38, 0]} rotation={[0, 0, 0]}>
           <Text3D font={TEXT_3D_FONT} size={0.48} height={0.1} curveSegments={6} bevelEnabled bevelSize={0.014} bevelThickness={0.014}>
             {spec.label}
-            <meshBasicMaterial color={spec.color ?? '#4dffb8'} />
+            <meshStandardMaterial
+              color={spec.color ?? '#4dffb8'}
+              emissive={spec.color ?? '#4dffb8'}
+              emissiveIntensity={0.32}
+              roughness={0.68}
+              metalness={0}
+            />
           </Text3D>
         </Center>
+      ) : spec.kind === 'block' ? (
+        <CrashBlock size={spec.size ?? [0.56, 0.56, 0.56]} color={spec.color ?? '#f2c55c'} />
       ) : (
         <DynamicCityModel model={spec.model ?? 'box_A'} />
       )}
-    </group>
+      </group>
+    </RigidBody>
+  );
+}
+
+function getBumpableCollider(spec: BumpableSpec, size: [number, number, number]) {
+  if (spec.kind === 'text') return { args: [0.26, 0.32, 0.12] as [number, number, number], position: [0, 0.38, 0.05] as [number, number, number] };
+  if (spec.kind === 'block') {
+    return {
+      args: [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5] as [number, number, number],
+      position: [0, size[1] * 0.5, 0] as [number, number, number]
+    };
+  }
+  return { args: [0.38, 0.32, 0.38] as [number, number, number], position: [0, 0.32, 0] as [number, number, number] };
+}
+
+function CrashBlock({ size, color }: { size: [number, number, number]; color: string }) {
+  return (
+    <mesh position={[0, size[1] * 0.5, 0]} castShadow receiveShadow>
+      <boxGeometry args={size} />
+      <meshStandardMaterial color={color} roughness={0.72} metalness={0} emissive={color} emissiveIntensity={0.035} />
+    </mesh>
   );
 }
 
@@ -779,9 +954,9 @@ function Skybox() {
 
 function CityGround() {
   return (
-    <mesh position={[0, -0.08, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+    <mesh position={[0, -0.08, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
       <planeGeometry args={[58, 58]} />
-      <meshBasicMaterial color="#aebcc0" />
+      <meshStandardMaterial color="#aebcc0" roughness={0.94} metalness={0} />
     </mesh>
   );
 }
@@ -929,7 +1104,7 @@ function InstancedModel({ model, placements }: { model: ModelName; placements: P
     mesh.instanceMatrix.needsUpdate = true;
   }, [placements]);
 
-  return <instancedMesh ref={ref} args={[geometry, material, placements.length]} />;
+  return <instancedMesh ref={ref} args={[geometry, material, placements.length]} castShadow receiveShadow />;
 }
 
 function PlacedCityModel({ placement, onGroup }: { placement: Placement; onGroup?: (group: THREE.Group) => void }) {
@@ -1298,8 +1473,8 @@ function cloneFlatScene(scene: THREE.Group) {
   clone.traverse((child) => {
     if (child instanceof THREE.Mesh) {
       child.material = makeFlatMaterial(child);
-      child.castShadow = false;
-      child.receiveShadow = false;
+      child.castShadow = true;
+      child.receiveShadow = true;
     }
   });
   return clone;
@@ -1353,7 +1528,15 @@ function makeFlatMaterial(mesh: THREE.Mesh) {
     texture.minFilter = THREE.NearestMipmapNearestFilter;
     texture.needsUpdate = true;
   }
-  return new THREE.MeshBasicMaterial({ map: texture, side: THREE.FrontSide });
+  return new THREE.MeshStandardMaterial({
+    map: texture,
+    side: THREE.FrontSide,
+    roughness: 0.82,
+    metalness: 0,
+    color: '#ffffff',
+    emissive: '#151515',
+    emissiveIntensity: 0.08
+  });
 }
 
 function findFirstMesh(scene: THREE.Group) {
@@ -1416,61 +1599,61 @@ function makeCvPois(roadLayout: { houseTileWidth: number; houseTileDepth: number
   return [
     {
       id: 'profile',
-      title: 'Game Developer Profile',
-      meta: 'Gameplay, tools, and interactive web portfolio',
-      tech: ['Unity', 'C#', 'TypeScript', 'R3F'],
+      title: 'Unity Game Developer',
+      meta: '4+ years building mobile and WebGL games in production teams',
+      tech: ['Unity', 'C#', 'Mobile', 'WebGL'],
       bullets: [
-        'Builds playable prototypes with clear controls, feedback, and iteration loops.',
-        'Comfortable turning technical CV content into interactive experiences.',
-        'Focuses on gameplay feel, asset integration, and browser delivery.'
+        'Ships gameplay features for Android and WebGL projects across small and mid-sized teams.',
+        'Focuses on player controls, moment-to-moment feel, UI flow, optimization, and release support.',
+        'Uses this portfolio scene to demonstrate interactive implementation, not only static CV content.'
       ],
       position: new THREE.Vector3(-0.5 * w, 0.08, 2.12 * d)
     },
     {
       id: 'gameplay',
-      title: 'Gameplay Projects',
-      meta: 'Player movement, camera, interaction, and vehicle feel',
-      tech: ['Gameplay', 'Camera', 'Input', 'Physics Feel'],
+      title: 'Gameplay Systems',
+      meta: 'Controls, combat, AI behavior, missions, levels, and vehicle feel',
+      tech: ['Input', 'Camera', 'AI', 'Physics Feel'],
       bullets: [
-        'Vehicle lane switching, drift effects, particles, and world-space markers.',
-        'Scene systems separated into path, handling, marker, and visual FX logic.',
-        'Iterates by playtesting camera, road alignment, and moment-to-moment feel.'
+        'Implemented movement, combat, AI behavior, mission flow, and player interaction systems.',
+        'Built level content and tuned progression for mobile gameplay loops.',
+        'Iterates through playtesting: camera framing, road alignment, collision feel, particles, and feedback timing.'
       ],
       position: new THREE.Vector3(0.5 * w, 0.08, 2.12 * d)
     },
     {
       id: 'skills',
-      title: 'Technical Skills',
-      meta: 'Game, web, and tooling stack',
-      tech: ['C#', 'Unity', 'Three.js', 'React', 'Git'],
+      title: 'Optimization & Tools',
+      meta: 'Mobile performance, WebGL constraints, debug workflow, and asset integration',
+      tech: ['Profiling', 'Firebase', 'AdMob', 'Git'],
       bullets: [
-        'Game scripting and prototype architecture.',
-        'React Three Fiber scenes with GLTF assets, particles, skyboxes, and controls.',
-        'GitHub Pages-ready frontend builds with Vite.'
+        'Works with performance-sensitive gameplay, including physics-heavy mobile interactions.',
+        'Integrates analytics, ads, assets, UI screens, and build-ready workflows for production delivery.',
+        'Comfortable debugging across Unity, browser builds, Git workflow, and frontend tooling.'
       ],
       position: new THREE.Vector3(-2.14 * w, 0.08, -0.5 * d)
     },
     {
       id: 'experience',
-      title: 'Experience',
-      meta: 'Small-team production mindset',
-      tech: ['Debugging', 'Iteration', 'Optimization'],
+      title: 'Multiplayer & Services',
+      meta: 'Client features for multiplayer/WebGL projects and live-service integrations',
+      tech: ['Photon Fusion', 'Nakama', 'Firebase', 'API'],
       bullets: [
-        'Breaks visual/gameplay problems into testable scene changes.',
-        'Balances asset constraints with simple runtime systems.',
-        'Keeps changes scoped and validates with local browser builds.'
+        'Supported multiplayer gameplay flows using Photon Fusion and Nakama-backed client work.',
+        'Integrated Firebase analytics, AdMob monetization, API handling, and multilingual UI support.',
+        'Understands the handoff between gameplay code, UI/UX, backend services, and release validation.'
       ],
       position: new THREE.Vector3(2.14 * w, 0.08, 0.5 * d)
     },
     {
       id: 'education',
-      title: 'Education & Direction',
-      meta: 'Candidate positioning for game development roles',
-      tech: ['Portfolio', 'CV', 'Game Dev'],
+      title: 'Production Mindset',
+      meta: 'Best fit: Unity gameplay, mobile optimization, and interactive portfolio work',
+      tech: ['Teamwork', 'Jira', 'Playtesting', 'Delivery'],
       bullets: [
-        'Portfolio direction favors game development over generic web presentation.',
-        'Interactive scenes demonstrate implementation, taste, and technical curiosity.',
-        'CV sections can be expanded into playable stations around the city.'
+        'Experience across intern, fresher, junior, and middle-level roles gives a practical team workflow base.',
+        'Best positioned for game development roles over generic web roles, with web used as a portfolio amplifier.',
+        'Next strongest improvement: add short video/GIF proof for each shipped project checkpoint.'
       ],
       position: new THREE.Vector3(-0.5 * w, 0.08, -2.12 * d)
     }
@@ -1483,46 +1666,52 @@ function makeBumpables(roadLayout: { houseTileWidth: number; houseTileDepth: num
   const bounds = makeCentralCollisionBounds(roadLayout);
   return sanitizeBumpableSpawns(
     [
-    ...makeBumpableLetters('gameplay', 'GAMEPLAY', '#49ffb2', new THREE.Vector3(0.65 * w, BUMPABLE_GROUND_Y, -2.62 * d), 0),
-    ...makeBumpableLetters('unity', 'UNITY', '#8df7ff', new THREE.Vector3(-0.55 * w, BUMPABLE_GROUND_Y, 2.62 * d), Math.PI),
-    ...makeBumpableLetters('r3f', 'R3F', '#ffe66d', new THREE.Vector3(-2.62 * w, BUMPABLE_GROUND_Y, 0.88 * d), -Math.PI / 2),
-    ...makeBumpableLetters('cv', 'CV', '#ff9df3', new THREE.Vector3(2.62 * w, BUMPABLE_GROUND_Y, -0.9 * d), Math.PI / 2),
-    {
-      id: 'box-left-a',
-      kind: 'box',
-      model: 'box_A',
-      position: new THREE.Vector3(-2.62 * w, BUMPABLE_GROUND_Y, -1.55 * d),
-      rotation: Math.PI / 5,
-      scale: 1.15,
-      radius: 0.65
-    },
-    {
-      id: 'box-right-b',
-      kind: 'box',
-      model: 'box_B',
-      position: new THREE.Vector3(2.62 * w, BUMPABLE_GROUND_Y, 1.48 * d),
-      rotation: -Math.PI / 7,
-      scale: 1.15,
-      radius: 0.65
-    },
-    {
-      id: 'trash-top',
-      kind: 'box',
-      model: 'trash_A',
-      position: new THREE.Vector3(1.72 * w, BUMPABLE_GROUND_Y, -2.62 * d),
-      rotation: Math.PI / 2,
-      scale: 1,
-      radius: 0.58
-    },
-    {
-      id: 'trash-bottom',
-      kind: 'box',
-      model: 'trash_B',
-      position: new THREE.Vector3(1.25 * w, BUMPABLE_GROUND_Y, 2.62 * d),
-      rotation: -Math.PI / 2,
-      scale: 1,
-      radius: 0.58
-    }
+      ...makeBumpableLetters('gameplay', 'GAMEPLAY', '#49ffb2', new THREE.Vector3(0.65 * w, BUMPABLE_GROUND_Y, -2.62 * d), 0),
+      ...makeBumpableLetters('unity', 'UNITY', '#8df7ff', new THREE.Vector3(-0.55 * w, BUMPABLE_GROUND_Y, 2.62 * d), Math.PI),
+      ...makeBumpableLetters('r3f', 'R3F', '#ffe66d', new THREE.Vector3(-2.62 * w, BUMPABLE_GROUND_Y, 0.88 * d), -Math.PI / 2),
+      ...makeBumpableLetters('cv', 'CV', '#ff9df3', new THREE.Vector3(2.62 * w, BUMPABLE_GROUND_Y, -0.9 * d), Math.PI / 2),
+      ...makeCrashBlockRow('north-boxes', new THREE.Vector3(-1.65 * w, BUMPABLE_GROUND_Y, -2.62 * d), 0, 5, '#ffcf5a'),
+      ...makeCrashBlockRow('south-boxes', new THREE.Vector3(1.72 * w, BUMPABLE_GROUND_Y, 2.62 * d), Math.PI, 5, '#7de3ff'),
+      ...makeCrashBlockStack('west-stack', new THREE.Vector3(-2.62 * w, BUMPABLE_GROUND_Y, -1.35 * d), '#ff8f70'),
+      ...makeCrashBlockStack('east-stack', new THREE.Vector3(2.62 * w, BUMPABLE_GROUND_Y, 1.38 * d), '#9ff27b'),
+      ...makeCrashSlalom('corner-slalom-a', new THREE.Vector3(-2.62 * w, BUMPABLE_GROUND_Y, 1.58 * d), -Math.PI / 2, '#f7f0a5'),
+      ...makeCrashSlalom('corner-slalom-b', new THREE.Vector3(2.62 * w, BUMPABLE_GROUND_Y, -1.58 * d), Math.PI / 2, '#ff9df3'),
+      {
+        id: 'box-left-a',
+        kind: 'box',
+        model: 'box_A',
+        position: new THREE.Vector3(-2.62 * w, BUMPABLE_GROUND_Y, -1.85 * d),
+        rotation: Math.PI / 5,
+        scale: 1.15,
+        radius: 0.65
+      },
+      {
+        id: 'box-right-b',
+        kind: 'box',
+        model: 'box_B',
+        position: new THREE.Vector3(2.62 * w, BUMPABLE_GROUND_Y, 1.78 * d),
+        rotation: -Math.PI / 7,
+        scale: 1.15,
+        radius: 0.65
+      },
+      {
+        id: 'trash-top',
+        kind: 'box',
+        model: 'trash_A',
+        position: new THREE.Vector3(1.72 * w, BUMPABLE_GROUND_Y, -2.62 * d),
+        rotation: Math.PI / 2,
+        scale: 1,
+        radius: 0.58
+      },
+      {
+        id: 'trash-bottom',
+        kind: 'box',
+        model: 'trash_B',
+        position: new THREE.Vector3(1.25 * w, BUMPABLE_GROUND_Y, 2.62 * d),
+        rotation: -Math.PI / 2,
+        scale: 1,
+        radius: 0.58
+      }
     ],
     bounds
   );
@@ -1544,10 +1733,59 @@ function makeBumpableLetters(id: string, label: string, color: string, center: T
   }));
 }
 
+function makeCrashBlockRow(id: string, center: THREE.Vector3, rotation: number, count: number, color: string): BumpableSpec[] {
+  const right = new THREE.Vector3(Math.cos(rotation), 0, -Math.sin(rotation));
+  const start = -(count - 1) * 0.5;
+  return Array.from({ length: count }, (_, index) => ({
+    id: `${id}-${index}`,
+    kind: 'block',
+    position: center.clone().addScaledVector(right, (start + index) * 0.55),
+    rotation: rotation + (index % 2 === 0 ? 0.08 : -0.08),
+    color,
+    size: [0.36, 0.36, 0.36],
+    radius: 0.34
+  }));
+}
+
+function makeCrashBlockStack(id: string, center: THREE.Vector3, color: string): BumpableSpec[] {
+  const offsets = [
+    [-0.32, 0, -0.26],
+    [0.24, 0, -0.18],
+    [-0.08, 0, 0.28],
+    [0.03, 0.44, 0.02]
+  ];
+  return offsets.map(([x, y, z], index) => ({
+    id: `${id}-${index}`,
+    kind: 'block',
+    position: center.clone().add(new THREE.Vector3(x, y, z)),
+    rotation: index * 0.38,
+    color,
+    size: index === 3 ? [0.34, 0.34, 0.34] : [0.4, 0.34, 0.4],
+    radius: 0.36
+  }));
+}
+
+function makeCrashSlalom(id: string, center: THREE.Vector3, rotation: number, color: string): BumpableSpec[] {
+  const forward = new THREE.Vector3(Math.sin(rotation), 0, Math.cos(rotation));
+  const lateral = new THREE.Vector3(Math.cos(rotation), 0, -Math.sin(rotation));
+  return Array.from({ length: 6 }, (_, index) => ({
+    id: `${id}-${index}`,
+    kind: 'block',
+    position: center
+      .clone()
+      .addScaledVector(forward, (index - 2.5) * 0.48)
+      .addScaledVector(lateral, index % 2 === 0 ? 0.22 : -0.22),
+    rotation: rotation + index * 0.22,
+    color,
+    size: [0.28, 0.46, 0.28],
+    radius: 0.3
+  }));
+}
+
 function sanitizeBumpableSpawns(specs: BumpableSpec[], bounds: CollisionBounds): BumpableSpec[] {
   return specs.map((spec) => {
     const position = spec.position.clone();
-    position.y = BUMPABLE_GROUND_Y;
+    position.y = Math.max(position.y, BUMPABLE_GROUND_Y);
     const radius = spec.radius + 0.08;
     const insideX = position.x > bounds.minX - radius && position.x < bounds.maxX + radius;
     const insideZ = position.z > bounds.minZ - radius && position.z < bounds.maxZ + radius;

@@ -5,10 +5,10 @@ export const profile = {
   phone: '0352614770',
   email: 'thanhnghia98@gmail.com',
   linkedIn: 'https://www.linkedin.com/in/nghia-nguyen-thanh-4b61a613a',
-  github: '#',
+  github: 'https://github.com/amas-nghia',
   cvPath: './cv/Nguyen-Thanh-Nghia-GameDeveloper.pdf',
   summary:
-    'Unity Game Developer with 4+ years of experience building mobile and WebGL games with Unity, C#, gameplay systems, mobile optimization, multiplayer, Firebase, AdMob, Photon, and Nakama.'
+    'Unity Game Developer with 4+ years building mobile and WebGL games, focused on gameplay systems, mobile optimization, multiplayer integration, and live game services.'
 };
 
 export const skills = [
