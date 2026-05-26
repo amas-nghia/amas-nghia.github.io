@@ -4,10 +4,9 @@ import * as THREE from 'three';
 import { profile } from '../data/profile';
 import { CityScene, type CvPoi } from './scene/CityScene';
 
-const CHECKPOINT_COUNT = 5;
+const CHECKPOINT_COUNT = 4;
 
 export function App() {
-  const [nearbyPoi, setNearbyPoi] = useState<CvPoi | null>(null);
   const [activePoi, setActivePoi] = useState<CvPoi | null>(null);
   const [visitedPois, setVisitedPois] = useState<Set<string>>(() => new Set());
   const [toast, setToast] = useState<CvPoi | null>(null);
@@ -46,7 +45,7 @@ export function App() {
         }}
       >
         <Suspense fallback={null}>
-          <CityScene onNearbyPoiChange={setNearbyPoi} onOpenPoi={openPoi} />
+          <CityScene onOpenPoi={openPoi} />
         </Suspense>
       </Canvas>
       <div className="overlay cv-overlay">
@@ -77,7 +76,7 @@ export function App() {
 
         <div className="control-strip" aria-label="Driving controls">
           <span>A / D: switch lane</span>
-          <span>E: inspect marker</span>
+          <span>Checkpoints open automatically</span>
         </div>
 
         <aside className="progress-log" aria-label="Checkpoint progress">
@@ -96,14 +95,6 @@ export function App() {
           <span>Checkpoint discovered</span>
           <strong>{toast?.title}</strong>
         </div>
-
-        <button
-          className={`prompt ${nearbyPoi && !activePoi ? 'is-visible' : ''}`}
-          type="button"
-          onClick={() => nearbyPoi && setActivePoi(nearbyPoi)}
-        >
-          Press E to inspect {nearbyPoi?.title}
-        </button>
 
         <section className={`project-panel ${activePoi ? 'is-open' : ''}`}>
           {activePoi ? (

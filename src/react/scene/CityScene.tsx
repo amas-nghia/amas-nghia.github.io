@@ -1,7 +1,7 @@
 import { useFrame, useLoader, useThree } from '@react-three/fiber';
 import { Center, ContactShadows, Text3D, useGLTF } from '@react-three/drei';
 import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from '@react-three/rapier';
-import { forwardRef, useEffect, useMemo, useRef, type MutableRefObject, type Ref } from 'react';
+import { forwardRef, useEffect, useMemo, useRef, useState, type MutableRefObject, type Ref } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
@@ -13,8 +13,8 @@ const ASSET_BASE = './assets/vendor/kaykit/city-builder-bits';
 const SKYBOX_BASE = './assets/vendor/sky/sky_89_2k/sky_89_cubemap_2k';
 const TEXT_3D_FONT = './assets/vendor/fonts/helvetiker_bold.typeface.json';
 const TILE = 2.15;
-const SIDE_VIEW_DISTANCE = 3.1;
-const SIDE_VIEW_HEIGHT = 2.1;
+const SIDE_VIEW_DISTANCE = 4.15;
+const SIDE_VIEW_HEIGHT = 5.35;
 const CAR_SPEED = 2.8;
 const CAR_CORNER_COMMIT_SPEED = 2.2;
 const CAR_RIDE_HEIGHT = 0.16;
@@ -49,7 +49,6 @@ const TIRE_TRACK_POINTS = 160;
 const SMOKE_PARTICLES = 20;
 const VEHICLE_DUST_PARTICLES = 140;
 const BUMPABLE_HIT_RADIUS = 0.8;
-const BUMPABLE_IMPULSE = 9.2;
 const BUMPABLE_GROUND_Y = 0.12;
 const TRAFFIC_BUMP_IMPULSE = 7.8;
 const TRAFFIC_RETURN_SPEED = 3.8;
@@ -291,6 +290,7 @@ export function CityScene({
     }))
   );
   const nearbyPoi = useRef<CvPoiMarker | null>(null);
+  const [checkpointTrigger, setCheckpointTrigger] = useState({ id: '', nonce: 0 });
   const driftFx = useRef<DriftFxState>({
     leftRear: new THREE.Vector3(),
     rightRear: new THREE.Vector3(),
@@ -317,7 +317,6 @@ export function CityScene({
         keyState.current.right = true;
         desiredLaneIndex.current = 1;
       }
-      if (event.key.toLowerCase() === 'e' && nearbyPoi.current) onOpenPoi?.(nearbyPoi.current);
     };
     const onKeyUp = (event: KeyboardEvent) => {
       if (event.key === 'ArrowLeft' || event.key.toLowerCase() === 'a') keyState.current.left = false;
@@ -450,6 +449,10 @@ export function CityScene({
     if (nearestPoi?.id !== nearbyPoi.current?.id) {
       nearbyPoi.current = nearestPoi;
       onNearbyPoiChange?.(nearestPoi ?? null);
+      if (nearestPoi) {
+        setCheckpointTrigger((current) => ({ id: nearestPoi.id, nonce: current.nonce + 1 }));
+        onOpenPoi?.(nearestPoi);
+      }
     }
     const vehicleYaw = Math.atan2(vehicleDirection.x, vehicleDirection.z);
     playerYaw.current = vehicleYaw;
@@ -562,13 +565,12 @@ export function CityScene({
       <Physics gravity={[0, -13.5, 0]} colliders={false} timeStep="vary">
         <RapierGround />
         <PlayerCarCollider position={visualCarPosition} yaw={playerYaw} />
-        <CentralCollisionBlock bounds={centralBounds} />
         <BumpableObjects specs={bumpables} />
         <ModelInstances placements={roadLayout.placements} />
         <TouchingBuildingBlock models={centerBuildingModels} refsStore={buildingRefs} roadLayout={roadLayout} />
         <OuterBuildingRing refsStore={buildingRefs} roadLayout={roadLayout} />
         <CityGround />
-        <CvMarkers pois={cvPois} />
+        <CvMarkers pois={cvPois} checkpointTrigger={checkpointTrigger} />
       </Physics>
       <FollowCar ref={targetCar} />
       <TireTracks driftFx={driftFx} />
@@ -584,11 +586,18 @@ export function CityScene({
 
 const trafficRefs = trafficCars.map(() => ({ current: { root: null, body: null } as CarRigRef }));
 
-function CvMarkers({ pois }: { pois: CvPoiMarker[] }) {
+function CvMarkers({ pois, checkpointTrigger }: { pois: CvPoiMarker[]; checkpointTrigger: { id: string; nonce: number } }) {
   return (
     <>
       {pois.map((poi, index) => (
-        <CvMarker key={poi.id} position={poi.position} index={index + 1} title={poi.title} />
+        <CvMarker
+          key={poi.id}
+          position={poi.position}
+          index={index + 1}
+          title={poi.title}
+          shouldSpin={checkpointTrigger.id === poi.id}
+          spinNonce={checkpointTrigger.nonce}
+        />
       ))}
     </>
   );
@@ -692,9 +701,21 @@ void main() {
 `
 };
 
-function CvMarker({ position, index, title }: { position: THREE.Vector3; index: number; title: string }) {
-  const floating = useRef<THREE.Group>(null);
-  const beacon = useRef<THREE.Group>(null);
+function CvMarker({
+  position,
+  index,
+  title,
+  shouldSpin,
+  spinNonce
+}: {
+  position: THREE.Vector3;
+  index: number;
+  title: string;
+  shouldSpin: boolean;
+  spinNonce: number;
+}) {
+  const board = useRef<THREE.Group>(null);
+  const spinProgress = useRef(1);
   const yaw = useMemo(() => getCheckpointFacingYaw(position), [position]);
   const shortTitle = useMemo(() => title.replace('Unity ', '').replace(' & ', ' + '), [title]);
   const labelTexture = useMemo(() => createCheckpointLabelTexture(index, shortTitle), [index, shortTitle]);
@@ -706,48 +727,34 @@ function CvMarker({ position, index, title }: { position: THREE.Vector3; index: 
     [labelTexture]
   );
 
-  useFrame(({ clock }) => {
-    const marker = floating.current;
-    if (marker) marker.position.y = position.y + 0.56 + Math.sin(clock.elapsedTime * 3.2 + index) * 0.055;
-    const beaconObject = beacon.current;
-    if (beaconObject) {
-      beaconObject.rotation.y = clock.elapsedTime * 0.9;
-      const pulse = 1 + Math.sin(clock.elapsedTime * 3 + index) * 0.08;
-      beaconObject.scale.setScalar(pulse);
+  useEffect(() => {
+    if (shouldSpin) spinProgress.current = 0;
+  }, [shouldSpin, spinNonce]);
+
+  useFrame(({ clock }, delta) => {
+    const marker = board.current;
+    if (marker) {
+      const idle = Math.sin(clock.elapsedTime * 2.4 + index) * 0.035;
+      if (spinProgress.current < 1) spinProgress.current = Math.min(1, spinProgress.current + delta * 1.45);
+      const eased = 1 - Math.pow(1 - spinProgress.current, 3);
+      marker.position.y = position.y + 0.72 + idle;
+      marker.rotation.y = yaw + Math.PI * 2 * 3 * eased;
     }
   });
 
   return (
     <group position={position}>
-      <mesh position={[0, 0.035, 0]} receiveShadow>
-        <cylinderGeometry args={[0.64, 0.64, 0.06, 36]} />
-        <meshStandardMaterial color="#172027" roughness={0.82} metalness={0} />
-      </mesh>
-      <mesh position={[0, 0.075, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.58, 0.78, 42]} />
-        <meshBasicMaterial color="#49ffb2" transparent opacity={0.72} side={THREE.DoubleSide} />
-      </mesh>
-      <group ref={beacon} position={[0, 0.08, 0]}>
-        <mesh rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[0.22, 0.3, 28]} />
-          <meshBasicMaterial color="#d8fff0" transparent opacity={0.9} side={THREE.DoubleSide} />
-        </mesh>
-      </group>
-      <mesh position={[0, 0.4, 0]}>
-        <cylinderGeometry args={[0.028, 0.04, 0.66, 12]} />
-        <meshStandardMaterial color="#203039" roughness={0.7} />
-      </mesh>
-      <group ref={floating} rotation={[0, yaw, 0]}>
-        <mesh position={[0, 0.44, 0]} castShadow>
-          <boxGeometry args={[0.98, 0.42, 0.06]} />
+      <group ref={board} rotation={[0, yaw, 0]}>
+        <mesh castShadow>
+          <boxGeometry args={[1.08, 0.5, 0.08]} />
           <meshStandardMaterial color="#101820" roughness={0.68} metalness={0} emissive="#071017" emissiveIntensity={0.18} />
         </mesh>
-        <mesh position={[0, 0.44, 0.038]}>
-          <planeGeometry args={[1, 0.44]} />
+        <mesh position={[0, 0, 0.045]}>
+          <planeGeometry args={[1.08, 0.5]} />
           <meshBasicMaterial map={labelTexture} transparent toneMapped={false} side={THREE.DoubleSide} />
         </mesh>
-        <mesh position={[0, 0.44, -0.038]} rotation={[0, Math.PI, 0]}>
-          <planeGeometry args={[1, 0.44]} />
+        <mesh position={[0, 0, -0.045]} rotation={[0, Math.PI, 0]}>
+          <planeGeometry args={[1.08, 0.5]} />
           <meshBasicMaterial map={labelTexture} transparent toneMapped={false} side={THREE.DoubleSide} />
         </mesh>
       </group>
@@ -792,42 +799,6 @@ function createCheckpointLabelTexture(index: number, title: string) {
   texture.minFilter = THREE.LinearFilter;
   texture.needsUpdate = true;
   return texture;
-}
-
-function CentralCollisionBlock({ bounds }: { bounds: CollisionBounds }) {
-  const width = bounds.maxX - bounds.minX;
-  const depth = bounds.maxZ - bounds.minZ;
-  const centerX = (bounds.minX + bounds.maxX) * 0.5;
-  const centerZ = (bounds.minZ + bounds.maxZ) * 0.5;
-  const wallHeight = 0.22;
-  const wallThickness = 0.18;
-
-  return (
-    <group position={[centerX, wallHeight * 0.5, centerZ]}>
-      <RigidBody type="fixed" colliders={false}>
-        <CuboidCollider args={[width * 0.5, wallHeight * 0.5, wallThickness * 0.5]} position={[0, 0, -depth * 0.5]} />
-        <CuboidCollider args={[width * 0.5, wallHeight * 0.5, wallThickness * 0.5]} position={[0, 0, depth * 0.5]} />
-        <CuboidCollider args={[wallThickness * 0.5, wallHeight * 0.5, depth * 0.5]} position={[-width * 0.5, 0, 0]} />
-        <CuboidCollider args={[wallThickness * 0.5, wallHeight * 0.5, depth * 0.5]} position={[width * 0.5, 0, 0]} />
-      </RigidBody>
-      <mesh position={[0, 0, -depth * 0.5]}>
-        <boxGeometry args={[width, wallHeight, wallThickness]} />
-        <meshBasicMaterial color="#8fa0a4" transparent opacity={0.62} />
-      </mesh>
-      <mesh position={[0, 0, depth * 0.5]}>
-        <boxGeometry args={[width, wallHeight, wallThickness]} />
-        <meshBasicMaterial color="#8fa0a4" transparent opacity={0.62} />
-      </mesh>
-      <mesh position={[-width * 0.5, 0, 0]}>
-        <boxGeometry args={[wallThickness, wallHeight, depth]} />
-        <meshBasicMaterial color="#8fa0a4" transparent opacity={0.62} />
-      </mesh>
-      <mesh position={[width * 0.5, 0, 0]}>
-        <boxGeometry args={[wallThickness, wallHeight, depth]} />
-        <meshBasicMaterial color="#8fa0a4" transparent opacity={0.62} />
-      </mesh>
-    </group>
-  );
 }
 
 function RapierGround() {
@@ -879,14 +850,14 @@ function BumpableObject({ spec }: { spec: BumpableSpec }) {
       colliders={false}
       position={spec.position}
       rotation={[0, spec.rotation ?? 0, 0]}
-      linearDamping={1.55}
-      angularDamping={0.95}
-      friction={0.85}
-      restitution={0.34}
+      linearDamping={1.75}
+      angularDamping={1.15}
+      friction={1.05}
+      restitution={0.22}
       canSleep
       ccd
     >
-      <CuboidCollider args={collider.args} position={collider.position} friction={0.9} restitution={0.38} density={spec.kind === 'text' ? 0.42 : 0.7} />
+      <CuboidCollider args={collider.args} position={collider.position} friction={1.05} restitution={0.22} density={spec.kind === 'text' ? 0.32 : 0.56} />
       <group scale={spec.scale ?? 1}>
       {spec.kind === 'text' ? (
         <Center position={[0, 0.38, 0]} rotation={[0, 0, 0]}>
@@ -912,19 +883,19 @@ function BumpableObject({ spec }: { spec: BumpableSpec }) {
 }
 
 function getBumpableCollider(spec: BumpableSpec, size: [number, number, number]) {
-  if (spec.kind === 'text') return { args: [0.26, 0.32, 0.12] as [number, number, number], position: [0, 0.38, 0.05] as [number, number, number] };
+  if (spec.kind === 'text') return { args: [0.28, 0.38, 0.14] as [number, number, number], position: [0, 0.42, 0.05] as [number, number, number] };
   if (spec.kind === 'block') {
     return {
       args: [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5] as [number, number, number],
-      position: [0, size[1] * 0.5, 0] as [number, number, number]
+      position: [0, size[1] * 0.5 + 0.04, 0] as [number, number, number]
     };
   }
-  return { args: [0.38, 0.32, 0.38] as [number, number, number], position: [0, 0.32, 0] as [number, number, number] };
+  return { args: [0.4, 0.35, 0.4] as [number, number, number], position: [0, 0.36, 0] as [number, number, number] };
 }
 
 function CrashBlock({ size, color }: { size: [number, number, number]; color: string }) {
   return (
-    <mesh position={[0, size[1] * 0.5, 0]} castShadow receiveShadow>
+    <mesh position={[0, size[1] * 0.5 + 0.04, 0]} castShadow receiveShadow>
       <boxGeometry args={size} />
       <meshStandardMaterial color={color} roughness={0.72} metalness={0} emissive={color} emissiveIntensity={0.035} />
     </mesh>
@@ -1107,24 +1078,37 @@ function InstancedModel({ model, placements }: { model: ModelName; placements: P
   return <instancedMesh ref={ref} args={[geometry, material, placements.length]} castShadow receiveShadow />;
 }
 
-function PlacedCityModel({ placement, onGroup }: { placement: Placement; onGroup?: (group: THREE.Group) => void }) {
+function PlacedCityModel({ placement, onGroup }: { placement: BuildingPlacement; onGroup?: (group: THREE.Group) => void }) {
   const ref = useRef<THREE.Group>(null);
   const gltf = useGLTF(`${ASSET_BASE}/${placement.model}.gltf`);
   const scene = useMemo(() => cloneFlatScene(gltf.scene), [gltf.scene]);
+  const scale = placement.scale ?? 1;
+  const colliderHalfExtent = Math.max(0.48, placement.radius * 0.74);
+  const colliderHalfHeight = Math.max(0.92, 1.18 * scale);
 
   useEffect(() => {
     if (ref.current && onGroup) onGroup(ref.current);
   }, [onGroup]);
 
   return (
-    <group
-      ref={ref}
+    <RigidBody
+      type="fixed"
+      colliders={false}
       position={placement.position}
       rotation={[0, placement.rotation ?? 0, 0]}
-      scale={placement.scale ?? 1}
+      friction={0.98}
+      restitution={0.08}
     >
-      <primitive object={scene} />
-    </group>
+      <CuboidCollider
+        args={[colliderHalfExtent, colliderHalfHeight, colliderHalfExtent]}
+        position={[0, colliderHalfHeight, 0]}
+        friction={0.98}
+        restitution={0.08}
+      />
+      <group ref={ref} scale={scale}>
+        <primitive object={scene} />
+      </group>
+    </RigidBody>
   );
 }
 
@@ -1607,7 +1591,7 @@ function makeCvPois(roadLayout: { houseTileWidth: number; houseTileDepth: number
         'Focuses on player controls, moment-to-moment feel, UI flow, optimization, and release support.',
         'Uses this portfolio scene to demonstrate interactive implementation, not only static CV content.'
       ],
-      position: new THREE.Vector3(-0.5 * w, 0.08, 2.12 * d)
+      position: new THREE.Vector3(0, 0.08, 2.12 * d)
     },
     {
       id: 'gameplay',
@@ -1619,7 +1603,7 @@ function makeCvPois(roadLayout: { houseTileWidth: number; houseTileDepth: number
         'Built level content and tuned progression for mobile gameplay loops.',
         'Iterates through playtesting: camera framing, road alignment, collision feel, particles, and feedback timing.'
       ],
-      position: new THREE.Vector3(0.5 * w, 0.08, 2.12 * d)
+      position: new THREE.Vector3(0, 0.08, -2.12 * d)
     },
     {
       id: 'skills',
@@ -1631,7 +1615,7 @@ function makeCvPois(roadLayout: { houseTileWidth: number; houseTileDepth: number
         'Integrates analytics, ads, assets, UI screens, and build-ready workflows for production delivery.',
         'Comfortable debugging across Unity, browser builds, Git workflow, and frontend tooling.'
       ],
-      position: new THREE.Vector3(-2.14 * w, 0.08, -0.5 * d)
+      position: new THREE.Vector3(-2.14 * w, 0.08, 0)
     },
     {
       id: 'experience',
@@ -1643,20 +1627,8 @@ function makeCvPois(roadLayout: { houseTileWidth: number; houseTileDepth: number
         'Integrated Firebase analytics, AdMob monetization, API handling, and multilingual UI support.',
         'Understands the handoff between gameplay code, UI/UX, backend services, and release validation.'
       ],
-      position: new THREE.Vector3(2.14 * w, 0.08, 0.5 * d)
+      position: new THREE.Vector3(2.14 * w, 0.08, 0)
     },
-    {
-      id: 'education',
-      title: 'Production Mindset',
-      meta: 'Best fit: Unity gameplay, mobile optimization, and interactive portfolio work',
-      tech: ['Teamwork', 'Jira', 'Playtesting', 'Delivery'],
-      bullets: [
-        'Experience across intern, fresher, junior, and middle-level roles gives a practical team workflow base.',
-        'Best positioned for game development roles over generic web roles, with web used as a portfolio amplifier.',
-        'Next strongest improvement: add short video/GIF proof for each shipped project checkpoint.'
-      ],
-      position: new THREE.Vector3(-0.5 * w, 0.08, -2.12 * d)
-    }
   ];
 }
 
